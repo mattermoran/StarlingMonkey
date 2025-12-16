@@ -15,7 +15,11 @@ impl JSUrl {
     fn update_params(&self) {
         if let Some(params) = unsafe { self.params.as_mut() } {
             params.list = self.url.query_pairs().into_owned().collect();
-            if let UrlOrString::Url(_, ref serialized_query_cache) = params.url_or_str {
+            if let UrlOrString::Url {
+                ref serialized_query_cache,
+                ..
+            } = params.url_or_str
+            {
                 *serialized_query_cache.borrow_mut() = None;
             }
         }
@@ -23,7 +27,10 @@ impl JSUrl {
 }
 
 enum UrlOrString {
-    Url(*mut JSUrl, RefCell<Option<String>>),
+    Url {
+        url: *mut JSUrl,
+        serialized_query_cache: RefCell<Option<String>>,
+    },
     Str(String),
 }
 
@@ -40,7 +47,10 @@ impl JSUrlSearchParams {
     /// This is used in `params_to_string` to hand out a stable reference.
     fn update_url_or_str(&mut self) {
         match self.url_or_str {
-            UrlOrString::Url(url, ref serialized_query_cache) => {
+            UrlOrString::Url {
+                url,
+                ref serialized_query_cache,
+            } => {
                 let url = unsafe { url.as_mut().unwrap() };
                 if self.list.is_empty() {
                     url.url.set_query(None);
@@ -227,7 +237,10 @@ pub unsafe extern "C" fn url_search_params(url: *mut JSUrl) -> *mut JSUrlSearchP
     if url.params.is_null() {
         url.params = Box::into_raw(Box::new(JSUrlSearchParams {
             list: url.url.query_pairs().into_owned().collect(),
-            url_or_str: UrlOrString::Url(url, RefCell::new(None)),
+            url_or_str: UrlOrString::Url {
+                url,
+                serialized_query_cache: RefCell::new(None),
+            },
         }));
     }
     url.params
@@ -406,18 +419,16 @@ pub extern "C" fn params_sort(params: &mut JSUrlSearchParams) {
 #[no_mangle]
 pub extern "C" fn params_to_string(params: &JSUrlSearchParams) -> SpecSlice<'_> {
     match &params.url_or_str {
-        UrlOrString::Url(_, serialized_query_cache) => {
-            if serialized_query_cache.borrow().is_none() {
-                let query = form_urlencoded::Serializer::new(String::new())
+        UrlOrString::Url {
+            serialized_query_cache,
+            ..
+        } => {
+            let mut cache = serialized_query_cache.borrow_mut();
+            let query = cache.get_or_insert_with(|| {
+                form_urlencoded::Serializer::new(String::new())
                     .extend_pairs(&params.list)
-                    .finish();
-
-                *serialized_query_cache.borrow_mut() = Some(query);
-            }
-
-            let cache = serialized_query_cache.borrow();
-            let query = cache.as_ref().unwrap();
-
+                    .finish()
+            });
             SpecSlice::new(query.as_ptr(), query.len())
         }
         UrlOrString::Str(str) => str.as_str().into(),
